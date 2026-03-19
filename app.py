@@ -3,6 +3,7 @@ import cv2
 import numpy as np
 import mixbox
 import io
+from rembg import remove
 
 # --- Helper Functions ---
 def adjust_saturation(img, scale):
@@ -10,16 +11,9 @@ def adjust_saturation(img, scale):
     if scale == 1.0:
         return img
     
-    # Convert to HSV and float32 for accurate math
     hsv_img = cv2.cvtColor(img, cv2.COLOR_BGR2HSV).astype(np.float32)
-    
-    # Multiply the saturation channel (index 1) by the scale factor
     hsv_img[:, :, 1] = hsv_img[:, :, 1] * scale
-    
-    # Clip the values to ensure they stay within the valid 0-255 range
     hsv_img[:, :, 1] = np.clip(hsv_img[:, :, 1], 0, 255)
-    
-    # Convert back to uint8 and BGR
     hsv_img = hsv_img.astype(np.uint8)
     return cv2.cvtColor(hsv_img, cv2.COLOR_HSV2BGR)
 
@@ -33,7 +27,7 @@ def posterize_image(img, n_colors):
 def clamp_to_mixable(b, g, r):
     """Forces an RGB color into the realistic bounds of physical paint using Mixbox."""
     latent = list(mixbox.rgb_to_latent((int(r), int(g), int(b))))
-    latent[4], latent[5], latent[6] = 0.0, 0.0, 0.0  # Zero out unmixable digital residuals
+    latent[4], latent[5], latent[6] = 0.0, 0.0, 0.0  
     mix_r, mix_g, mix_b = mixbox.latent_to_rgb(latent)
     return int(mix_b), int(mix_g), int(mix_r)
 
@@ -86,6 +80,46 @@ def generate_mixing_key_array(colors):
 
     return key_img
 
+def add_registration_marks(img, color=(0, 0, 0), length=25, thickness=3, offset=0):
+    """Adds right-angle registration marks to the corners of an image."""
+    marked_img = img.copy()
+    h, w = marked_img.shape[:2]
+    
+    cv2.line(marked_img, (offset, offset), (offset + length, offset), color, thickness)
+    cv2.line(marked_img, (offset, offset), (offset, offset + length), color, thickness)
+    cv2.line(marked_img, (w - offset, offset), (w - offset - length, offset), color, thickness)
+    cv2.line(marked_img, (w - offset, offset), (w - offset, offset + length), color, thickness)
+    cv2.line(marked_img, (offset, h - offset), (offset + length, h - offset), color, thickness)
+    cv2.line(marked_img, (offset, h - offset), (offset, h - offset - length), color, thickness)
+    cv2.line(marked_img, (w - offset, h - offset), (w - offset - length, h - offset), color, thickness)
+    cv2.line(marked_img, (w - offset, h - offset), (w - offset, h - offset - length), color, thickness)
+    
+    return marked_img
+
+def append_guide_to_image(main_img, guide_img):
+    """Vertically concatenates the main image and the mixing guide, centering them."""
+    h1, w1 = main_img.shape[:2]
+    h2, w2 = guide_img.shape[:2]
+    
+    target_w = max(w1, w2)
+    
+    if w1 < target_w:
+        pad_left = (target_w - w1) // 2
+        pad_right = target_w - w1 - pad_left
+        main_padded = cv2.copyMakeBorder(main_img, 0, 0, pad_left, pad_right, cv2.BORDER_CONSTANT, value=[255, 255, 255])
+    else:
+        main_padded = main_img
+        
+    if w2 < target_w:
+        pad_left = (target_w - w2) // 2
+        pad_right = target_w - w2 - pad_left
+        guide_padded = cv2.copyMakeBorder(guide_img, 0, 0, pad_left, pad_right, cv2.BORDER_CONSTANT, value=[255, 255, 255])
+    else:
+        guide_padded = guide_img
+        
+    separator = np.ones((40, target_w, 3), dtype=np.uint8) * 255
+    return cv2.vconcat([main_padded, separator, guide_padded])
+
 # --- Session State Callbacks ---
 def update_palette_color(index):
     """Callback triggered when the user picks a new color."""
@@ -98,35 +132,42 @@ st.set_page_config(page_title="Paint By Numbers Generator", layout="wide")
 st.title("🎨 Paint By Numbers Generator")
 st.write("Upload an image to generate an interactive, customizable paint-by-numbers kit.")
 
-# Initialize Session State
 if "processed" not in st.session_state:
     st.session_state.processed = False
     st.session_state.labels = None
     st.session_state.palette_bgr = []
     st.session_state.img_shape = None
 
-# Sidebar controls
 st.sidebar.header("Settings")
-n_colors = st.sidebar.slider("Number of Colors", min_value=2, max_value=4, value=4)
+n_colors = st.sidebar.slider("Number of Colors", min_value=2, max_value=5, value=4)
 smoothing = st.sidebar.slider("Edge Smoothing", min_value=1, max_value=31, value=9, step=2)
 saturation_scale = st.sidebar.slider("Saturation", min_value=0.0, max_value=3.0, value=1.0, step=0.1, 
                                      help="1.0 is original. < 1.0 mutes colors, > 1.0 boosts colors.")
+remove_bg = st.sidebar.checkbox("Remove Background (leaves subject on white)", value=False)
 
 uploaded_file = st.file_uploader("Choose an image...", type=["jpg", "jpeg", "png"])
 
 if uploaded_file is not None:
-    # Read the uploaded file into OpenCV format
-    file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
-    opencv_image = cv2.imdecode(file_bytes, 1)
+    file_bytes = uploaded_file.read()
     
-    st.sidebar.image(cv2.cvtColor(opencv_image, cv2.COLOR_BGR2RGB), caption="Original Image", use_container_width=True)
+    if remove_bg:
+        with st.spinner("Isolating subject and removing background..."):
+            result_bytes = remove(file_bytes)
+            rgba_image = cv2.imdecode(np.frombuffer(result_bytes, np.uint8), cv2.IMREAD_UNCHANGED)
+            
+            alpha = rgba_image[:, :, 3] / 255.0
+            bg = np.ones_like(rgba_image[:, :, :3]) * 255
+            for c in range(3):
+                bg[:, :, c] = (alpha * rgba_image[:, :, c] + (1 - alpha) * bg[:, :, c])
+            opencv_image = bg.astype(np.uint8)
+    else:
+        opencv_image = cv2.imdecode(np.frombuffer(file_bytes, np.uint8), 1)
     
-    # --- Generate Button (Runs heavy K-Means) ---
+    st.sidebar.image(cv2.cvtColor(opencv_image, cv2.COLOR_BGR2RGB), caption="Working Image", use_container_width=True)
+    
     if st.button("Generate Paint by Numbers"):
         with st.spinner('Running K-Means Clustering... This may take a few seconds.'):
             img = opencv_image.copy()
-            
-            # Apply the new saturation scaling
             img = adjust_saturation(img, saturation_scale)
 
             if smoothing % 2 == 0:
@@ -134,22 +175,16 @@ if uploaded_file is not None:
             img = cv2.medianBlur(img, smoothing)
 
             raw_labels, raw_centers = posterize_image(img, n_colors)
-            
-            # Clamp initial centers to mixable colors
             mixable_centers = [clamp_to_mixable(*c) for c in raw_centers]
             
-            # Sort by luminance (light to dark)
             lum = [0.299 * c[2] + 0.587 * c[1] + 0.114 * c[0] for c in mixable_centers]
             sorted_indices = np.argsort(lum)[::-1]
             
-            # Save the sorted palette to session state
             st.session_state.palette_bgr = [mixable_centers[idx] for idx in sorted_indices]
             
-            # --- NEW FIX: Force color picker widgets to update their internal state ---
             for i, color_bgr in enumerate(st.session_state.palette_bgr):
                 st.session_state[f"color_picker_{i}"] = bgr_to_hex(*color_bgr)
             
-            # Remap the labels so they match the newly sorted palette index
             remapped_labels = np.zeros_like(raw_labels)
             for new_idx, old_idx in enumerate(sorted_indices):
                 remapped_labels[raw_labels == old_idx] = new_idx
@@ -158,13 +193,11 @@ if uploaded_file is not None:
             st.session_state.img_shape = img.shape
             st.session_state.processed = True
 
-    # --- Interactive UI (Runs instantly) ---
     if st.session_state.processed:
         st.divider()
         st.subheader("🎨 Editable Palette")
         st.write("Click any color square below to edit the generated palette. The paint mixtures will instantly update!")
         
-        # Display Color Pickers
         cols = st.columns(len(st.session_state.palette_bgr))
         for i, color_bgr in enumerate(st.session_state.palette_bgr):
             current_hex = bgr_to_hex(*color_bgr)
@@ -176,7 +209,6 @@ if uploaded_file is not None:
                 args=(i,)
             )
 
-        # Build Composite Image from State
         labels2d = st.session_state.labels.reshape(st.session_state.img_shape[:2])
         posterized_full_image = np.zeros(st.session_state.img_shape, dtype=np.uint8)
         
@@ -185,37 +217,30 @@ if uploaded_file is not None:
             mask = (labels2d == i)
             posterized_full_image[mask] = color_bgr
             
-            # Generate Individual Layer Image
             color_layer = np.ones(st.session_state.img_shape, dtype=np.uint8) * 255
             color_layer[mask] = color_bgr
             hex_color = bgr_to_hex(*color_bgr)
             layers.append((hex_color, color_layer))
 
-        # Render Results
+        mix_key = generate_mixing_key_array(st.session_state.palette_bgr)
+
         st.subheader("1. Full Posterized Preview")
         st.image(cv2.cvtColor(posterized_full_image, cv2.COLOR_BGR2RGB), use_container_width=True)
         
-        is_success_preview, buffer_preview = cv2.imencode(".png", posterized_full_image)
+        marked_full = add_registration_marks(posterized_full_image)
+        combined_full = append_guide_to_image(marked_full, mix_key)
+        
+        is_success_preview, buffer_preview = cv2.imencode(".png", combined_full)
         if is_success_preview:
             st.download_button(
-                label="Download Posterized Preview",
+                label="Download Posterized Preview + Full Guide",
                 data=io.BytesIO(buffer_preview),
-                file_name="0_posterized_full.png",
+                file_name="0_posterized_full_with_guide.png",
                 mime="image/png"
             )
         
         st.subheader("2. Color Mixing Key")
-        mix_key = generate_mixing_key_array(st.session_state.palette_bgr)
         st.image(cv2.cvtColor(mix_key, cv2.COLOR_BGR2RGB), use_container_width=True)
-        
-        is_success_key, buffer_key = cv2.imencode(".png", mix_key)
-        if is_success_key:
-            st.download_button(
-                label="Download Pigment Mixing Key",
-                data=io.BytesIO(buffer_key),
-                file_name="mixing_key.png",
-                mime="image/png"
-            )
         
         st.subheader("3. Individual Color Layers")
         layer_cols = st.columns(len(layers))
@@ -223,11 +248,19 @@ if uploaded_file is not None:
             with layer_cols[i]:
                 st.image(cv2.cvtColor(layer_img, cv2.COLOR_BGR2RGB), caption=f"Layer {i+1} ({hex_code})")
                 
-                is_success, buffer = cv2.imencode(".png", layer_img)
+                # --- NEW: Generate a guide with ONLY the current color ---
+                single_color_key = generate_mixing_key_array([st.session_state.palette_bgr[i]])
+                
+                marked_layer = add_registration_marks(layer_img)
+                
+                # --- NEW: Append the single color key instead of the full mix_key ---
+                combined_layer = append_guide_to_image(marked_layer, single_color_key)
+                
+                is_success, buffer = cv2.imencode(".png", combined_layer)
                 if is_success:
                     st.download_button(
-                        label=f"Download L{i+1}",
+                        label=f"Download L{i+1} + Guide",
                         data=io.BytesIO(buffer),
-                        file_name=f"layer_{i+1}_{hex_code}.png",
+                        file_name=f"layer_{i+1}_{hex_code}_with_guide.png",
                         mime="image/png"
                     )
