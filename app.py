@@ -80,6 +80,48 @@ def generate_mixing_key_array(colors):
 
     return key_img
 
+def generate_paint_by_numbers(labels2d, n_colors, img_shape):
+    """Generates a paint-by-numbers image with outlined regions and numbers."""
+    h, w = labels2d.shape
+    pbn_img = np.ones((h, w, 3), dtype=np.uint8) * 255
+
+    # Draw outlines between different-colored regions
+    for i in range(n_colors):
+        mask = (labels2d == i).astype(np.uint8) * 255
+        contours, _ = cv2.findContours(mask, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+        cv2.drawContours(pbn_img, contours, -1, (0, 0, 0), 1)
+
+    # Determine font scale based on image size
+    base_scale = min(h, w) / 800.0
+    font_scale = max(0.3, min(base_scale * 0.5, 1.5))
+    font_thickness = max(1, int(base_scale * 1.2))
+    min_area = (min(h, w) / 50) ** 2  # skip tiny regions
+
+    # Place numbers in each connected component
+    for i in range(n_colors):
+        mask = (labels2d == i).astype(np.uint8)
+        num_components, comp_labels = cv2.connectedComponents(mask)
+
+        for comp_id in range(1, num_components):
+            comp_mask = (comp_labels == comp_id).astype(np.uint8)
+            area = cv2.countNonZero(comp_mask)
+            if area < min_area:
+                continue
+
+            # Use distance transform to find the point most interior to the region
+            dist = cv2.distanceTransform(comp_mask, cv2.DIST_L2, 5)
+            _, _, _, max_loc = cv2.minMaxLoc(dist)
+            cx, cy = max_loc
+
+            label = str(i + 1)
+            text_size, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, font_thickness)
+            tx = cx - text_size[0] // 2
+            ty = cy + text_size[1] // 2
+            cv2.putText(pbn_img, label, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX,
+                        font_scale, (0, 0, 0), font_thickness, cv2.LINE_AA)
+
+    return pbn_img
+
 def add_registration_marks(img, color=(0, 0, 0), length=25, thickness=3, offset=0):
     """Adds right-angle registration marks to the corners of an image."""
     marked_img = img.copy()
@@ -139,8 +181,8 @@ if "processed" not in st.session_state:
     st.session_state.img_shape = None
 
 st.sidebar.header("Settings")
-n_colors = st.sidebar.slider("Number of Colors", min_value=2, max_value=5, value=4)
-smoothing = st.sidebar.slider("Edge Smoothing", min_value=1, max_value=31, value=9, step=2)
+n_colors = st.sidebar.slider("Number of Colors", min_value=2, max_value=8, value=4)
+smoothing = st.sidebar.slider("Edge Smoothing", min_value=1, max_value=31, value=9)
 saturation_scale = st.sidebar.slider("Saturation", min_value=0.0, max_value=3.0, value=1.0, step=0.1, 
                                      help="1.0 is original. < 1.0 mutes colors, > 1.0 boosts colors.")
 remove_bg = st.sidebar.checkbox("Remove Background (leaves subject on white)", value=False)
@@ -168,6 +210,14 @@ if uploaded_file is not None:
     if st.button("Generate Paint by Numbers"):
         with st.spinner('Running K-Means Clustering... This may take a few seconds.'):
             img = opencv_image.copy()
+
+            # Resize to 1000px wide, maintaining aspect ratio
+            h0, w0 = img.shape[:2]
+            if w0 != 1000:
+                new_w = 1000
+                new_h = int(h0 * new_w / w0)
+                img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
             img = adjust_saturation(img, saturation_scale)
 
             if smoothing % 2 == 0:
@@ -218,18 +268,34 @@ if uploaded_file is not None:
             posterized_full_image[mask] = color_bgr
             
             color_layer = np.ones(st.session_state.img_shape, dtype=np.uint8) * 255
-            color_layer[mask] = color_bgr
+            color_layer[mask] = (0, 0, 0)
             hex_color = bgr_to_hex(*color_bgr)
             layers.append((hex_color, color_layer))
 
         mix_key = generate_mixing_key_array(st.session_state.palette_bgr)
 
-        st.subheader("1. Full Posterized Preview")
+        st.subheader("1. Paint by Numbers")
+        pbn_img = generate_paint_by_numbers(labels2d, len(st.session_state.palette_bgr), st.session_state.img_shape)
+        st.image(cv2.cvtColor(pbn_img, cv2.COLOR_BGR2RGB), use_container_width=True)
+
+        marked_pbn = add_registration_marks(pbn_img)
+        combined_pbn = append_guide_to_image(marked_pbn, mix_key)
+
+        is_success_pbn, buffer_pbn = cv2.imencode(".png", combined_pbn)
+        if is_success_pbn:
+            st.download_button(
+                label="Download Paint by Numbers + Color Key",
+                data=io.BytesIO(buffer_pbn),
+                file_name="paint_by_numbers_with_guide.png",
+                mime="image/png"
+            )
+
+        st.subheader("2. Full Posterized Preview")
         st.image(cv2.cvtColor(posterized_full_image, cv2.COLOR_BGR2RGB), use_container_width=True)
-        
+
         marked_full = add_registration_marks(posterized_full_image)
         combined_full = append_guide_to_image(marked_full, mix_key)
-        
+
         is_success_preview, buffer_preview = cv2.imencode(".png", combined_full)
         if is_success_preview:
             st.download_button(
@@ -238,11 +304,11 @@ if uploaded_file is not None:
                 file_name="0_posterized_full_with_guide.png",
                 mime="image/png"
             )
-        
-        st.subheader("2. Color Mixing Key")
+
+        st.subheader("3. Color Mixing Key")
         st.image(cv2.cvtColor(mix_key, cv2.COLOR_BGR2RGB), use_container_width=True)
         
-        st.subheader("3. Individual Color Layers")
+        st.subheader("4. Individual Color Layers")
         layer_cols = st.columns(len(layers))
         for i, (hex_code, layer_img) in enumerate(layers):
             with layer_cols[i]:
