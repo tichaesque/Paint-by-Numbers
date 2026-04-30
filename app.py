@@ -196,10 +196,10 @@ if uploaded_file is not None:
         with st.spinner('Running K-Means Clustering... This may take a few seconds.'):
             img = opencv_image.copy()
 
-            # Resize to 792px wide, maintaining aspect ratio
+            # Resize to 612px wide, maintaining aspect ratio
             h0, w0 = img.shape[:2]
-            if w0 != 792:
-                new_w = 792
+            if w0 != 612:
+                new_w = 612
                 new_h = int(h0 * new_w / w0)
                 img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
