@@ -3,7 +3,6 @@ import cv2
 import numpy as np
 import mixbox
 import io
-from rembg import remove
 
 # --- Helper Functions ---
 def adjust_saturation(img, scale):
@@ -170,9 +169,9 @@ def update_palette_color(index):
     st.session_state.palette_bgr[index] = clamp_to_mixable(b, g, r)
 
 # --- Streamlit Web UI ---
-st.set_page_config(page_title="Paint By Numbers Generator", layout="wide")
-st.title("🎨 Paint By Numbers Generator")
-st.write("Upload an image to generate an interactive, customizable paint-by-numbers kit.")
+st.set_page_config(page_title="MIT Museum: Transforming Portraits", layout="wide")
+st.title("🎨 MIT Museum: Transforming Portraits")
+st.write("Upload an image to generate a customizable paint-by-numbers kit!")
 
 if "processed" not in st.session_state:
     st.session_state.processed = False
@@ -185,25 +184,11 @@ n_colors = st.sidebar.slider("Number of Colors", min_value=2, max_value=8, value
 smoothing = st.sidebar.slider("Edge Smoothing", min_value=1, max_value=31, value=9)
 saturation_scale = st.sidebar.slider("Saturation", min_value=0.0, max_value=3.0, value=1.0, step=0.1, 
                                      help="1.0 is original. < 1.0 mutes colors, > 1.0 boosts colors.")
-remove_bg = st.sidebar.checkbox("Remove Background (leaves subject on white)", value=False)
-
 uploaded_file = st.file_uploader("Choose an image...", type=["jpg", "jpeg", "png"])
 
 if uploaded_file is not None:
     file_bytes = uploaded_file.read()
-    
-    if remove_bg:
-        with st.spinner("Isolating subject and removing background..."):
-            result_bytes = remove(file_bytes)
-            rgba_image = cv2.imdecode(np.frombuffer(result_bytes, np.uint8), cv2.IMREAD_UNCHANGED)
-            
-            alpha = rgba_image[:, :, 3] / 255.0
-            bg = np.ones_like(rgba_image[:, :, :3]) * 255
-            for c in range(3):
-                bg[:, :, c] = (alpha * rgba_image[:, :, c] + (1 - alpha) * bg[:, :, c])
-            opencv_image = bg.astype(np.uint8)
-    else:
-        opencv_image = cv2.imdecode(np.frombuffer(file_bytes, np.uint8), 1)
+    opencv_image = cv2.imdecode(np.frombuffer(file_bytes, np.uint8), 1)
     
     st.sidebar.image(cv2.cvtColor(opencv_image, cv2.COLOR_BGR2RGB), caption="Working Image", use_container_width=True)
     
@@ -274,23 +259,23 @@ if uploaded_file is not None:
 
         mix_key = generate_mixing_key_array(st.session_state.palette_bgr)
 
-        st.subheader("1. Paint by Numbers")
-        pbn_img = generate_paint_by_numbers(labels2d, len(st.session_state.palette_bgr), st.session_state.img_shape)
-        st.image(cv2.cvtColor(pbn_img, cv2.COLOR_BGR2RGB), use_container_width=True)
+        # st.subheader("1. Paint by Numbers")
+        # pbn_img = generate_paint_by_numbers(labels2d, len(st.session_state.palette_bgr), st.session_state.img_shape)
+        # st.image(cv2.cvtColor(pbn_img, cv2.COLOR_BGR2RGB), use_container_width=True)
 
-        marked_pbn = add_registration_marks(pbn_img)
-        combined_pbn = append_guide_to_image(marked_pbn, mix_key)
+        # marked_pbn = add_registration_marks(pbn_img)
+        # combined_pbn = append_guide_to_image(marked_pbn, mix_key)
 
-        is_success_pbn, buffer_pbn = cv2.imencode(".png", combined_pbn)
-        if is_success_pbn:
-            st.download_button(
-                label="Download Paint by Numbers + Color Key",
-                data=io.BytesIO(buffer_pbn),
-                file_name="paint_by_numbers_with_guide.png",
-                mime="image/png"
-            )
+        # is_success_pbn, buffer_pbn = cv2.imencode(".png", combined_pbn)
+        # if is_success_pbn:
+        #     st.download_button(
+        #         label="Download Paint by Numbers + Color Key",
+        #         data=io.BytesIO(buffer_pbn),
+        #         file_name="paint_by_numbers_with_guide.png",
+        #         mime="image/png"
+        #     )
 
-        st.subheader("2. Full Posterized Preview")
+        st.subheader("Full Posterized Preview")
         st.image(cv2.cvtColor(posterized_full_image, cv2.COLOR_BGR2RGB), use_container_width=True)
 
         marked_full = add_registration_marks(posterized_full_image)
@@ -305,10 +290,10 @@ if uploaded_file is not None:
                 mime="image/png"
             )
 
-        st.subheader("3. Color Mixing Key")
+        st.subheader("Color Mixing Key")
         st.image(cv2.cvtColor(mix_key, cv2.COLOR_BGR2RGB), use_container_width=True)
         
-        st.subheader("4. Individual Color Layers")
+        st.subheader("Individual Color Layers")
         layer_cols = st.columns(len(layers))
         for i, (hex_code, layer_img) in enumerate(layers):
             with layer_cols[i]:
